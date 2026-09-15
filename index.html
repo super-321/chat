@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>号码聊天 · 无需 WebRTC</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root {
+    --bg:#f2f3f5; --panel:#fff; --line:#e5e7eb; --text:#1f2328;
+    --sub:#8b939c; --brand:#3b7cff; --ok:#22c55e; --warn:#f59e0b;
+  }
+  html,body { height:100%; margin:0; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--text);
+    display:flex; align-items:center; justify-content:center;
+  }
+  #app { width:100%; max-width:520px; height:100%; max-height:880px; background:var(--bg);
+    display:flex; flex-direction:column; box-shadow:0 8px 40px rgba(0,0,0,.10); overflow:hidden; }
+  @media (min-width:600px){ #app { height:92vh; border-radius:14px; } }
+
+  header { flex:none; padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:10px; }
+  .mynum { font-size:13px; color:var(--sub); }
+  .mynum b { font-size:17px; color:var(--text); letter-spacing:2px; font-variant-numeric:tabular-nums; }
+  .status { font-size:12px; color:var(--sub); display:flex; align-items:center; gap:5px; margin-left:auto; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#c9ced4; }
+  .dot.on { background:var(--ok); box-shadow:0 0 0 3px rgba(34,197,94,.18); }
+  .dot.wait { background:var(--warn); }
+  .btn-mini { font-size:12px; padding:4px 10px; border:1px solid var(--line); background:#fff;
+    border-radius:6px; color:var(--sub); cursor:pointer; }
+
+  #errbar { flex:none; background:#fdecec; color:#b42318; border-bottom:1px solid #f6c9c6;
+    padding:10px 14px; font-size:13px; line-height:1.6; display:none; }
+  #errbar b { display:block; margin-bottom:2px; }
+  #toast { position:fixed; left:50%; bottom:34px; transform:translateX(-50%) translateY(14px);
+    background:rgba(28,32,38,.94); color:#fff; font-size:14px; padding:11px 18px; border-radius:22px;
+    z-index:200; opacity:0; pointer-events:none; transition:opacity .22s,transform .22s;
+    max-width:86vw; text-align:center; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+  main { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .row { display:flex; flex-direction:column; max-width:78%; }
+  .row.self { align-self:flex-end; align-items:flex-end; }
+  .row.other { align-self:flex-start; }
+  .bubble { padding:9px 13px; border-radius:14px; font-size:15px; line-height:1.5;
+    word-break:break-word; white-space:pre-wrap; }
+  .row.self .bubble { background:var(--brand); color:#fff; border-bottom-right-radius:4px; }
+  .row.other .bubble { background:#fff; color:var(--text); border-bottom-left-radius:4px;
+    box-shadow:0 1px 2px rgba(0,0,0,.06); }
+  .bubble img { max-width:100%; border-radius:10px; display:block; cursor:zoom-in; }
+  .meta { font-size:11px; color:var(--sub); margin:4px 4px 0; display:flex; gap:6px; align-items:center; }
+  .meta .pending { color:var(--warn); }
+  .meta .sent { color:var(--ok); }
+  .sys { align-self:center; font-size:12px; color:var(--sub); background:rgba(0,0,0,.05);
+    padding:4px 10px; border-radius:20px; text-align:center; }
+  .row.pending .bubble { opacity:.62; }
+
+  #setup { flex:1; overflow-y:auto; padding:18px; }
+  .card { background:var(--panel); border-radius:12px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+  .card h2 { margin:0 0 6px; font-size:16px; }
+  .card p { margin:0 0 14px; font-size:13px; color:var(--sub); line-height:1.6; }
+  .btns { display:flex; gap:10px; }
+  button.primary { flex:1; padding:11px; border:none; border-radius:9px; background:var(--brand);
+    color:#fff; font-size:15px; font-weight:500; cursor:pointer; }
+  button.primary:hover { filter:brightness(1.06); }
+  button.ghost { flex:1; padding:11px; border:1px solid var(--line); border-radius:9px;
+    background:#fff; color:var(--text); font-size:15px; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:not-allowed; }
+  label { display:block; font-size:13px; font-weight:600; margin:0 0 6px; }
+  .hint { font-size:12px; color:var(--sub); margin-top:8px; line-height:1.6; }
+  .pininput { width:100%; font-size:40px; font-weight:700; letter-spacing:16px; text-align:center;
+    padding:14px 0; border:1px solid var(--line); border-radius:12px; outline:none;
+    font-variant-numeric:tabular-nums; font-family:inherit; color:var(--text); }
+  .pininput:focus { border-color:var(--brand); }
+
+  #dial { flex:none; background:var(--panel); border-bottom:1px solid var(--line); padding:10px 12px;
+    display:flex; gap:8px; align-items:center; }
+  #dial input { flex:1; padding:9px 12px; font-size:16px; border:1px solid var(--line);
+    border-radius:9px; outline:none; letter-spacing:3px; font-variant-numeric:tabular-nums; }
+  #dial input:focus { border-color:var(--brand); }
+  #dial button { flex:none; padding:9px 16px; border:none; border-radius:9px; background:var(--brand);
+    color:#fff; font-size:14px; cursor:pointer; }
+  #peerState { flex:none; font-size:12px; color:var(--sub); padding:6px 14px; background:#fafbfc;
+    border-bottom:1px solid var(--line); }
+  #peerState b { color:var(--text); letter-spacing:2px; font-variant-numeric:tabular-nums; }
+  .contacts { flex:none; display:flex; gap:8px; padding:8px 12px; background:var(--panel);
+    border-bottom:1px solid var(--line); overflow-x:auto; }
+  .chip { flex:none; padding:5px 12px; border:1px solid var(--line); border-radius:16px; font-size:13px;
+    background:#fff; cursor:pointer; font-variant-numeric:tabular-nums; letter-spacing:1px; }
+  .chip.on { border-color:var(--brand); color:var(--brand); }
+  .chip .d { display:inline-block; width:6px; height:6px; border-radius:50%; background:#c9ced4; margin-right:5px; }
+  .chip .d.on { background:var(--ok); }
+
+  #composer { flex:none; background:var(--panel); border-top:1px solid var(--line); padding:10px 12px;
+    display:flex; align-items:flex-end; gap:8px; }
+  #composer textarea { flex:1; height:22px; max-height:110px; padding:6px 10px; font-size:15px;
+    font-family:inherit; border-radius:18px; border:1px solid var(--line); resize:none; outline:none; }
+  .icon-btn { flex:none; width:36px; height:36px; border-radius:50%; border:1px solid var(--line);
+    background:#fff; cursor:pointer; font-size:17px; line-height:1; color:var(--sub); }
+  #send { flex:none; height:36px; padding:0 16px; border:none; border-radius:18px; background:var(--brand);
+    color:#fff; font-size:14px; cursor:pointer; }
+  #send:disabled { background:#c7d4ea; cursor:not-allowed; }
+
+  #lightbox { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none;
+    align-items:center; justify-content:center; z-index:99; padding:20px; }
+  #lightbox img { max-width:100%; max-height:100%; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="mynum">我的号码 <b id="myNumShow">----</b></div>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">未上线</span></div>
+    <button class="btn-mini" id="btnLeave">换号</button>
+  </header>
+
+  <div id="errbar"></div>
+
+  <div id="setup">
+    <div class="card" id="panelBoot">
+      <h2>取一个 4 位号码</h2>
+      <p>这是你在网络里的固定号码，会记在这台设备上，下次打开还是它。别人用这个号码就能找到你。</p>
+      <input id="numInput" class="pininput" type="text" inputmode="numeric" pattern="[0-9]*"
+             maxlength="4" autocomplete="off" placeholder="····">
+      <div class="hint" id="bootHint" style="text-align:center">输入 1000 - 9999 之间任意 4 位数字</div>
+      <div class="btns" style="margin-top:14px">
+        <button class="primary" id="btnGo">上线</button>
+      </div>
+      <div class="hint">
+        🔒 需要 <b>https</b> 环境（或 localhost）才能加密。<br>
+        全程不需要 WebRTC，任何现代浏览器都能用。聊天内容在你手机上加密后才发出，中转方只看到密文。
+      </div>
+    </div>
+
+    <div class="card hidden" id="panelWait">
+      <h2>正在上线…</h2>
+      <p id="waitHint">正在检查号码是否被占用</p>
+    </div>
+  </div>
+
+  <div id="dial" class="hidden">
+    <input id="peerInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+           autocomplete="off" placeholder="输入对方号码">
+    <button id="btnCall">开始聊天</button>
+  </div>
+  <div class="contacts hidden" id="contacts"></div>
+  <div id="peerState" class="hidden">尚未选择联系人，输入对方 4 位号码开始</div>
+  <main id="chat" class="hidden"></main>
+  <div id="composer" class="hidden">
+    <button class="icon-btn" id="pickImg" title="发送图片">🖼️</button>
+    <input type="file" id="fileInput" accept="image/*" class="hidden">
+    <textarea id="input" rows="1" placeholder="输入消息，Enter 发送"></textarea>
+    <button id="send">发送</button>
+  </div>
+</div>
+
+<div id="lightbox"><img id="lightboxImg" alt=""></div>
+<div id="toast"></div>
+
+<script>
+/* ================= 基础 ================= */
+const $ = id => document.getElementById(id);
+const NS = 'ybnum/v2';
+const T = n => ({ pres: NS + '/p/' + n + '/presence', msg: NS + '/p/' + n + '/msg' });
+const ONLINE_TTL = 60000, HB_MS = 20000;
+const randSid = () => Math.random().toString(36).slice(2, 10);
+const now = () => Date.now();
+
+function showError(t, d) { const b = $('errbar'); b.innerHTML = '<b>⚠️ ' + t + '</b>' + (d || ''); b.style.display = 'block'; }
+function clearError() { $('errbar').style.display = 'none'; }
+window.addEventListener('error', e => showError('脚本出错', e.message));
+window.addEventListener('unhandledrejection', e => { const r = e.reason; showError('操作失败', (r && (r.message || r.name)) || String(r)); });
+function guard(fn) { return async function (...a) { try { return await fn.apply(this, a); } catch (err) { console.error(err); showError('操作失败', (err && err.message) || String(err)); } }; }
+let toastTimer = null;
+function toast(msg, ms = 2600) {
+  const t = $('toast'); if (!t) return;
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+function setStatus(s, text) { $('dot').className = 'dot' + (s === 'on' ? ' on' : s === 'wait' ? ' wait' : ''); $('statusText').textContent = text; }
+const timeStr = ts => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+/* ================= 本地存储 ================= */
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('ybnum:' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('ybnum:' + k, JSON.stringify(v)); return true; } catch (e) { return false; } },
+  del(k) { try { localStorage.removeItem('ybnum:' + k); } catch (e) {} }
+};
+function pruneIfQuota(key, build) {
+  if (LS.set(key, build())) return;
+  const h = LS.get(key, []);
+  for (let i = 0; i < h.length && !LS.set(key, build()); i++) if (h[i].src) h[i].src = null;
+}
+
+/* ================= 端到端加密（ECDH + AES-GCM） ================= */
+let KP = null;
+const EC = { name: 'ECDH', namedCurve: 'P-256' };
+async function loadKP() {
+  const saved = LS.get('kp', null);
+  if (saved && saved.pubJwk && saved.privJwk) { KP = saved; return KP; }
+  const k = await crypto.subtle.generateKey(EC, true, ['deriveKey', 'deriveBits']);
+  KP = { pubJwk: await crypto.subtle.exportKey('jwk', k.publicKey), privJwk: await crypto.subtle.exportKey('jwk', k.privateKey) };
+  LS.set('kp', KP);
+  return KP;
+}
+async function aesFrom(myPrivJwk, peerPubJwk) {
+  const priv = await crypto.subtle.importKey('jwk', myPrivJwk, EC, true, ['deriveKey', 'deriveBits']);
+  const pub = await crypto.subtle.importKey('jwk', peerPubJwk, EC, true, []);
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, priv, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+function b64(u8) { let s = '', C = 0x8000; for (let i = 0; i < u8.length; i += C) s += String.fromCharCode.apply(null, u8.subarray(i, i + C)); return btoa(s); }
+function unb64(str) { const s = atob(str); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+async function encFor(peerPubJwk, obj) {
+  const key = await aesFrom(KP.privJwk, peerPubJwk);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return { epk: KP.pubJwk, iv: b64(iv), ct: b64(new Uint8Array(ct)) };
+}
+async function decEnv(env) {
+  const key = await aesFrom(KP.privJwk, env.epk);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(env.iv) }, key, unb64(env.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+/* 号码指纹：让双方在号码之外再核对一层，防止号码被顶替 */
+async function numFingerprint(n, epk) {
+  const src = n + '|' + JSON.stringify(epk);
+  let h = 2166136261;
+  for (let i = 0; i < src.length; i++) { h ^= src.charCodeAt(i); h = (h * 16777619) >>> 0; }
+  return String(h % 10000).padStart(4, '0');
+}
+
+/* ================= MQTT 中转（唯一通道） ================= */
+const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
+let mq = null;
+function loadMQTT() {
+  if (window.mqtt) return Promise.resolve();
+  const urls = ['https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js',
+                'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js',
+                'https://fastly.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js'];
+  return new Promise((res, rej) => {
+    let i = 0;
+    (function next() {
+      if (i >= urls.length) return rej(new Error('无法加载通信库，请检查网络连接'));
+      const s = document.createElement('script');
+      s.src = urls[i++]; s.onload = () => (window.mqtt ? res() : next()); s.onerror = next;
+      document.head.appendChild(s);
+    })();
+  });
+}
+function connectBroker() {
+  if (mq) return Promise.resolve(mq);
+  return new Promise((res, rej) => {
+    let i = 0;
+    (function tryNext() {
+      if (i >= BROKERS.length) return rej(new Error('所有中转服务都连不上，请稍后重试'));
+      const url = BROKERS[i++]; let settled = false, c;
+      try { c = mqtt.connect(url, { clientId: 'ybnum-' + randSid(), clean: true, connectTimeout: 8000, reconnectPeriod: 3000, keepalive: 30 }); }
+      catch (e) { return tryNext(); }
+      const to = setTimeout(() => { if (settled) return; settled = true; try { c.end(true); } catch (e) {} tryNext(); }, 8000);
+      c.on('connect', () => { if (settled) return; settled = true; clearTimeout(to); mq = c; bindMqtt(); res(c); });
+      c.on('error', () => { if (settled) return; settled = true; clearTimeout(to); try { c.end(true); } catch (e) {} tryNext(); });
+    })();
+  });
+}
+function pub(topic, obj, retain) { if (mq) { try { mq.publish(topic, JSON.stringify(obj), { qos: 0, retain: !!retain }); } catch (e) {} } }
+function pubRaw(topic, s, retain) { if (mq) { try { mq.publish(topic, s, { qos: 0, retain: !!retain }); } catch (e) {} } }
+function clearRetained(topic) { pubRaw(topic, '', true); }
+function sub(topic) { if (mq) { try { mq.subscribe(topic, { qos: 0 }); } catch (e) {} } }
+
+/* ================= 状态 ================= */
+let myNum = null, mySid = randSid();
+let peerNum = null;
+let pres = {};        // num -> { sid, epk, ts }
+let outbox = [];      // 待发送 { id, to, kind, text, src, ts }
+let history = {};     // num -> [item]
+let contacts = LS.get('contacts', []);
+const seen = new Set();
+
+const isOnline = n => !!(pres[n] && pres[n].ts && now() - pres[n].ts < ONLINE_TTL && pres[n].sid);
+function touchContact(n) {
+  contacts = [n].concat(contacts.filter(x => x !== n)).slice(0, 8);
+  LS.set('contacts', contacts);
+  renderContacts();
+}
+
+/* ================= 上线注册 ================= */
+function publishPresence() {
+  if (!myNum) return;
+  pub(T(myNum).pres, { num: myNum, sid: mySid, epk: KP.pubJwk, ts: now() }, true);
+}
+let hbTimer = null;
+function startHeartbeat() {
+  clearInterval(hbTimer);
+  publishPresence();
+  hbTimer = setInterval(publishPresence, HB_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) publishPresence(); });
+}
+window.addEventListener('beforeunload', () => { if (myNum) clearRetained(T(myNum).pres); });
+
+$('btnGo').onclick = guard(async () => {
+  const n = ($('numInput').value || '').trim();
+  if (!/^\d{4}$/.test(n)) { $('bootHint').textContent = '请输入 4 位数字'; return showError('号码格式不对', '请输入 1000 - 9999 之间的 4 位数字。'); }
+  if (!window.isSecureContext) {
+    const isHttps = location.protocol === 'https:';
+    return showError(
+      '需要 https 环境',
+      isHttps
+        ? '地址是 https，但浏览器判定当前页面<b>不安全</b>（常见于自签名证书或代理）。请换用正常证书的地址访问。'
+        : '浏览器只在 <b>https</b>（或 localhost）下提供加密能力，当前是 <code>' + location.protocol + '</code>。<br>' +
+          '请把本文件放到 <b>GitHub Pages / Netlify / Vercel</b>（都免费）后用 https 打开。'
+    );
+  }
+  $('btnGo').disabled = true;
+  showPanel('panelWait');
+  $('waitHint').textContent = '正在接通网络…';
+  try {
+    await loadMQTT();
+    await connectBroker();
+    await loadKP();
+    $('waitHint').textContent = '正在检查号码 ' + n + ' 是否被占用…';
+    const taken = await checkOccupied(n);
+    if (taken) {
+      showPanel('panelBoot');
+      $('numInput').value = '';
+      $('bootHint').textContent = '换一个试试';
+      return showError('号码 ' + n + ' 已被占用', '这个号码正被另一台设备使用，请换一个 4 位数字。');
+    }
+    myNum = n;
+    LS.set('num', n);
+    mySid = randSid();
+    enterMain();
+  } catch (e) {
+    showPanel('panelBoot');
+    showError('上线失败', (e && e.message) || String(e));
+  } finally { $('btnGo').disabled = false; }
+});
+$('numInput').addEventListener('input', e => {
+  e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
+  $('bootHint').textContent = e.target.value.length === 4 ? '按「上线」确认' : '输入 1000 - 9999 之间任意 4 位数字';
+});
+
+function checkOccupied(n) {
+  return new Promise(resolve => {
+    const topic = T(n).pres; let done = false;
+    const h = (t, p) => {
+      if (done || t !== topic || !p || !p.length) return;
+      let o; try { o = JSON.parse(p.toString()); } catch (e) { return; }
+      if (o && o.sid && o.sid !== mySid && now() - o.ts < ONLINE_TTL) { done = true; mq.off && mq.off('message', h); resolve(true); }
+    };
+    mq.on('message', h);
+    sub(topic);
+    setTimeout(() => { if (!done) { done = true; mq.off && mq.off('message', h); resolve(false); } }, 1600);
+  });
+}
+
+/* ================= 进入主界面 ================= */
+function showPanel(name) {
+  ['panelBoot', 'panelWait'].forEach(id => $(id).classList.add('hidden'));
+  if (name) { $('setup').classList.remove('hidden'); $(name).classList.remove('hidden'); }
+  else $('setup').classList.add('hidden');
+}
+function enterMain() {
+  showPanel(null);
+  $('myNumShow').textContent = myNum;
+  ['dial', 'contacts', 'peerState', 'chat', 'composer'].forEach(id => $(id).classList.remove('hidden'));
+  outbox = LS.get('outbox', []);
+  startHeartbeat();
+  sub(T(myNum).msg);
+  sub(T(myNum).pres);
+  setStatus('on', '已上线');
+  renderContacts();
+  watchAll();
+  const last = LS.get('lastPeer', null);
+  if (last) openChatWith(last, true);
+  else renderPeerState();
+  setInterval(() => { renderContacts(); renderPeerState(); }, 5000);
+}
+function watchAll() {
+  const nums = new Set(contacts);
+  outbox.forEach(o => nums.add(o.to));
+  if (peerNum) nums.add(peerNum);
+  nums.forEach(n => n && sub(T(n).pres));
+}
+function renderContacts() {
+  const box = $('contacts');
+  if (!contacts.length) { box.innerHTML = '<span style="font-size:12px;color:var(--sub)">最近联系人会出现在这里</span>'; return; }
+  box.innerHTML = '';
+  contacts.forEach(n => {
+    const b = document.createElement('div');
+    b.className = 'chip' + (n === peerNum ? ' on' : '');
+    const d = document.createElement('span');
+    d.className = 'd' + (isOnline(n) ? ' on' : '');
+    b.appendChild(d);
+    b.appendChild(document.createTextNode(n));
+    b.onclick = () => openChatWith(n);
+    box.appendChild(b);
+  });
+}
+function renderPeerState() {
+  const el = $('peerState');
+  if (!peerNum) { el.textContent = '尚未选择联系人，输入对方 4 位号码开始'; return; }
+  const on = isOnline(peerNum);
+  const pend = outbox.filter(o => o.to === peerNum).length;
+  el.innerHTML = '对方 <b>' + peerNum + '</b> · ' + (on ? '<span style="color:var(--ok)">在线</span>' : '离线') +
+    (pend ? ' · <span style="color:var(--warn)">' + pend + ' 条待发送</span>' : '');
+}
+
+/* ================= 消息收发 ================= */
+function bindMqtt() {
+  mq.on('message', (topic, payload) => {
+    const p = payload && payload.length ? payload.toString() : '';
+    if (topic.endsWith('/presence')) return onPresence(topic, p);
+    if (topic.endsWith('/msg')) return onMsg(topic, p);
+  });
+  mq.on('reconnect', () => { if (myNum) { publishPresence(); sub(T(myNum).msg); sub(T(myNum).pres); watchAll(); } });
+}
+function onPresence(topic, p) {
+  const m = topic.match(/\/p\/(\d{4})\/presence$/);
+  const num = m ? m[1] : null;
+  if (!p) { if (num && pres[num]) { delete pres[num]; renderContacts(); renderPeerState(); } return; }
+  let o; try { o = JSON.parse(p); } catch (e) { return; }
+  if (!o || !o.num) return;
+  if (o.ts && now() - o.ts < ONLINE_TTL) {
+    const wasOnline = isOnline(o.num);
+    pres[o.num] = { sid: o.sid, epk: o.epk, ts: o.ts };
+    if (!wasOnline) { renderContacts(); renderPeerState(); flushPeer(o.num); }
+  } else if (pres[o.num]) { delete pres[o.num]; renderContacts(); renderPeerState(); }
+}
+async function onMsg(topic, p) {
+  if (!p) return;
+  let o; try { o = JSON.parse(p); } catch (e) { return; }
+  if (!o) return;
+  const from = o.from;
+  if (o.type === 'ack') {
+    const got = o.ids || [];
+    let changed = false;
+    outbox = outbox.filter(x => {
+      if (x.to === from && got.indexOf(x.id) >= 0) { markSent(x.to, x.id); changed = true; return false; }
+      return true;
+    });
+    if (changed) { saveOutbox(); renderPeerState(); if (from === peerNum) renderHist(); }
+    return;
+  }
+  if (!o.ct) return;
+  let m;
+  try { m = await decEnv({ epk: o.epk, iv: o.iv, ct: o.ct }); }
+  catch (e) {
+    appendHist(from, { id: 'bad_' + now(), who: 'you', kind: 'text',
+      text: '⚠️ 有一条消息无法解密（对方可能更换了设备或清除了浏览器数据）', ts: now(), st: 'recv' });
+    if (from === peerNum) renderHist();
+    return;
+  }
+  if (!m || !m.id) return;
+  if (seen.has(m.id)) { ackTo(from, [m.id]); return; }
+  seen.add(m.id);
+  appendHist(from, { id: m.id, who: 'you', kind: m.kind, text: m.text, src: m.src, ts: m.ts || now(), st: 'recv' });
+  touchContact(from);
+  if (from !== peerNum) openChatWith(from, true);
+  else renderHist();
+  ackTo(from, [m.id]);
+  if (document.hidden || from !== peerNum) toast('收到 ' + from + ' 的新消息');
+}
+function ackTo(num, ids) { pub(T(num).msg, { type: 'ack', from: myNum, ids: ids }, false); }
+
+/* ================= 会话与历史 ================= */
+function histKey(n) { return 'hist:' + n; }
+function getHist(n) { if (!history[n]) history[n] = LS.get(histKey(n), []); return history[n]; }
+function saveHist(n) { pruneIfQuota(histKey(n), () => (history[n] || []).slice(-120)); }
+function appendHist(n, item) { const h = getHist(n); if (!h.some(x => x.id === item.id)) { h.push(item); saveHist(n); } }
+function markSent(n, id) { const h = getHist(n); const it = h.find(x => x.id === id); if (it) { it.st = 'sent'; saveHist(n); } }
+
+function openChatWith(n, quiet) {
+  peerNum = n; LS.set('lastPeer', n); touchContact(n);
+  sub(T(n).pres); sub(T(n).msg);
+  $('peerInput').value = n;
+  renderContacts(); renderHist(); renderPeerState();
+  if (!quiet) toast(isOnline(n) ? n + ' 在线' : n + ' 当前离线，消息会排队等他上线');
+}
+function renderHist() {
+  const box = $('chat'); box.innerHTML = '';
+  if (!peerNum) return;
+  const h = getHist(peerNum);
+  if (!h.length) { const d = document.createElement('div'); d.className = 'sys'; d.textContent = '还没有消息，说句话试试'; box.appendChild(d); return; }
+  h.forEach(it => box.appendChild(renderItem(it)));
+  box.scrollTop = box.scrollHeight;
+}
+function renderItem(it) {
+  const row = document.createElement('div');
+  row.className = 'row ' + (it.who === 'me' ? 'self' : 'other') + (it.st === 'pending' ? ' pending' : '');
+  const b = document.createElement('div'); b.className = 'bubble';
+  if (it.kind === 'img') {
+    if (it.src) {
+      const img = document.createElement('img'); img.src = it.src;
+      img.onclick = () => { $('lightboxImg').src = it.src; $('lightbox').style.display = 'flex'; };
+      b.appendChild(img);
+    } else b.textContent = '[图片已清理]';
+  } else b.textContent = it.text || '';
+  const m = document.createElement('div'); m.className = 'meta';
+  m.innerHTML = '<span>' + timeStr(it.ts) + '</span>';
+  if (it.who === 'me') {
+    if (it.st === 'pending') m.innerHTML += '<span class="pending">🕓 待发送（对方离线）</span>';
+    else if (it.st === 'sent') m.innerHTML += '<span class="sent">✓ 已送达</span>';
+  }
+  row.appendChild(b); row.appendChild(m);
+  return row;
+}
+function sysMsg(t) { const d = document.createElement('div'); d.className = 'sys'; d.textContent = t; $('chat').appendChild(d); $('chat').scrollTop = $('chat').scrollHeight; }
+
+/* ================= 发送 ================= */
+function saveOutbox() { pruneIfQuota('outbox', () => outbox); }
+function newId() { return now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+async function sendNow(it) {
+  const p = pres[it.to];
+  if (!p || !p.epk) return false;
+  try {
+    const env = await encFor(p.epk, { id: it.id, kind: it.kind, text: it.text, src: it.src, ts: it.ts });
+    pub(T(it.to).msg, { from: myNum, epk: env.epk, iv: env.iv, ct: env.ct }, false);
+    return true;
+  } catch (e) { console.error(e); return false; }
+}
+
+async function submit(kind, text, src) {
+  if (!peerNum) return showError('还没选联系人', '请先在上方输入对方的 4 位号码。');
+  const it = { id: newId(), to: peerNum, kind, text: text || '', src: src || null, ts: now() };
+  if (!isOnline(peerNum)) {
+    appendHist(it.to, { ...it, who: 'me', st: 'pending' });
+    outbox.push(it); saveOutbox();
+    renderHist(); renderPeerState();
+    toast(peerNum + ' 离线，消息已排队，上线后自动发送');
+    return;
+  }
+  appendHist(it.to, { ...it, who: 'me', st: 'sent' });
+  outbox.push(it); saveOutbox();
+  const ok = await sendNow(it);
+  if (!ok) {
+    outbox = outbox.filter(x => x.id !== it.id);
+    const h = getHist(it.to); const rec = h.find(x => x.id === it.id);
+    if (rec) { rec.st = 'pending'; saveHist(it.to); }
+    outbox.push(it); saveOutbox();
+    toast('发送未成功，将在对方上线后重试');
+  }
+  renderHist(); renderPeerState();
+}
+
+/* 对方上线 → 自动重发 */
+let flushing = false;
+async function flushPeer(num) {
+  if (flushing || !num || !isOnline(num)) return;
+  const items = outbox.filter(o => o.to === num);
+  if (!items.length) return;
+  flushing = true;
+  try {
+    for (const it of items) {
+      if (!isOnline(num)) break;
+      const ok = await sendNow(it);
+      if (!ok) break;
+      outbox = outbox.filter(x => x.id !== it.id);
+      saveOutbox();
+      await new Promise(r => setTimeout(r, 150));
+    }
+  } finally {
+    flushing = false;
+    renderHist(); renderPeerState();
+  }
+}
+setInterval(() => {
+  const nums = new Set(outbox.map(o => o.to));
+  nums.forEach(n => { if (isOnline(n)) flushPeer(n); });
+}, 6000);
+
+/* ================= 图片（自适应压缩，适配中转报文上限） ================= */
+function compressImg(file, maxDim = 1024, q = 0.72) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width: w, height: h } = img;
+        const s = Math.min(1, maxDim / Math.max(w, h));
+        w = Math.max(1, Math.round(w * s)); h = Math.max(1, Math.round(h * s));
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        let out = c.toDataURL('image/jpeg', q);
+        // 超过约 150KB 就继续降质量/尺寸
+        let dim = maxDim, qq = q;
+        while (out.length > 150000 && dim > 320) {
+          dim = Math.round(dim * 0.75); qq = Math.max(0.4, qq - 0.12);
+          const s2 = Math.min(1, dim / Math.max(w, h));
+          const c2 = document.createElement('canvas');
+          c2.width = Math.max(1, Math.round(w * s2)); c2.height = Math.max(1, Math.round(h * s2));
+          c2.getContext('2d').drawImage(img, 0, 0, c2.width, c2.height);
+          out = c2.toDataURL('image/jpeg', qq);
+        }
+        res(out);
+      };
+      img.onerror = rej; img.src = fr.result;
+    };
+    fr.onerror = rej; fr.readAsDataURL(file);
+  });
+}
+
+/* ================= 交互绑定 ================= */
+$('btnCall').onclick = guard(async () => {
+  const n = ($('peerInput').value || '').trim();
+  if (!/^\d{4}$/.test(n)) return showError('号码不对', '请输入对方的 <b>4 位</b>号码。');
+  if (n === myNum) return showError('不能连自己', '请输入对方的号码。');
+  openChatWith(n);
+});
+$('peerInput').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); });
+$('peerInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnCall').click(); });
+
+function autoGrow() { const t = $('input'); t.style.height = '22px'; t.style.height = Math.min(t.scrollHeight, 110) + 'px'; }
+$('input').addEventListener('input', () => { autoGrow(); $('send').disabled = !$('input').value.trim(); });
+$('input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('send').click(); } });
+$('send').onclick = guard(async () => {
+  const t = $('input').value.trim();
+  if (!t) return;
+  $('input').value = ''; autoGrow(); $('send').disabled = true;
+  await submit('text', t, null);
+});
+$('pickImg').onclick = () => $('fileInput').click();
+$('fileInput').onchange = guard(async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  toast('正在压缩图片…');
+  try { await submit('img', '', await compressImg(f)); }
+  catch (err) { showError('图片处理失败', (err && err.message) || String(err)); }
+});
+$('input').addEventListener('paste', guard(async e => {
+  const item = [...((e.clipboardData && e.clipboardData.items) || [])].find(i => i.type.startsWith('image/'));
+  if (item) { e.preventDefault(); await submit('img', '', await compressImg(item.getAsFile())); }
+}));
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', guard(async e => {
+  e.preventDefault();
+  const f = [...(e.dataTransfer.files || [])].find(f => f.type.startsWith('image/'));
+  if (f && peerNum) await submit('img', '', await compressImg(f));
+}));
+$('lightbox').onclick = () => $('lightbox').style.display = 'none';
+$('btnLeave').onclick = guard(() => {
+  if (myNum) clearRetained(T(myNum).pres);
+  if (mq) { try { mq.end(true); } catch (e) {} mq = null; }
+  clearInterval(hbTimer);
+  LS.del('num'); LS.del('lastPeer');
+  myNum = null; peerNum = null; pres = {};
+  ['dial', 'contacts', 'peerState', 'chat', 'composer'].forEach(id => $(id).classList.add('hidden'));
+  $('myNumShow').textContent = '----';
+  setStatus('', '未上线');
+  $('numInput').value = ''; $('bootHint').textContent = '输入 1000 - 9999 之间任意 4 位数字';
+  showPanel('panelBoot');
+  toast('已下线，号码已释放');
+});
+
+/* ================= 启动 ================= */
+(async function init() {
+  if (/MicroMessenger/i.test(navigator.userAgent)) {
+    showError('微信内置浏览器', '功能受限，请点右上角「···」→ 在浏览器中打开。');
+  }
+  if (!window.isSecureContext) {
+    showError(
+      '当前环境不支持加密',
+      '浏览器只在 <b>https</b> 或 <b>localhost</b> 下开放加密接口，当前是 <code>' + location.protocol + '</code>。<br>' +
+      '请把本文件传到 <b>GitHub Pages / Netlify / Vercel</b>（免费）后用 https 打开即可正常使用。'
+    );
+  }
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    showError('浏览器缺少加密支持', '请升级浏览器，或换用 Chrome / Edge / Safari / Firefox 的较新版本。');
+  }
+  const saved = LS.get('num', null);
+  if (saved && /^\d{4}$/.test(saved)) {
+    $('numInput').value = saved;
+    $('bootHint').textContent = '上次用的号码，按「上线」继续';
+  }
+  showPanel('panelBoot');
+})();
+</script>
+</body>
+</html>
