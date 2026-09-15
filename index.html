@@ -113,6 +113,7 @@
 <div id="app">
   <header>
     <div class="mynum">我的号码 <b id="myNumShow">----</b></div>
+    <button class="btn-mini" id="btnNotify" title="消息通知">🔔</button>
     <div class="status"><span class="dot" id="dot"></span><span id="statusText">未上线</span></div>
     <button class="btn-mini" id="btnLeave">换号</button>
   </header>
@@ -129,6 +130,10 @@
       <div class="btns" style="margin-top:14px">
         <button class="primary" id="btnGo">上线</button>
       </div>
+      <div class="btns" style="margin-top:8px">
+        <button class="ghost" id="btnNotifyBoot">🔔 开启消息通知</button>
+      </div>
+      <div class="hint" id="notifyHint"></div>
       <div class="hint">
         🔒 需要 <b>https</b> 环境（或 localhost）才能加密。<br>
         全程不需要 WebRTC，任何现代浏览器都能用。聊天内容在你手机上加密后才发出，中转方只看到密文。
@@ -181,6 +186,89 @@ function toast(msg, ms = 2600) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 function setStatus(s, text) { $('dot').className = 'dot' + (s === 'on' ? ' on' : s === 'wait' ? ' wait' : ''); $('statusText').textContent = text; }
+
+/* ================= 消息通知 ================= */
+const NOTIFY_OK = () => typeof Notification !== 'undefined';
+let unread = 0;              // 未读消息数
+let audioCtx = null;
+
+function notifyState() {
+  if (!NOTIFY_OK()) return 'unsupported';
+  if (Notification.permission === 'granted') return 'on';
+  if (Notification.permission === 'denied') return 'denied';
+  return 'off';
+}
+function renderNotifyBtn() {
+  const b = $('btnNotify'), bb = $('btnNotifyBoot'), h = $('notifyHint');
+  const s = notifyState();
+  const icon = s === 'on' ? '🔔' : (s === 'denied' ? '🔕' : '🔕');
+  if (b) { b.textContent = icon; b.title = s === 'on' ? '通知已开启（点击关闭）' : '点击开启通知'; }
+  if (bb) {
+    bb.textContent = s === 'on' ? '🔔 通知已开启' : (s === 'denied' ? '🔕 通知被浏览器阻止' : '🔔 开启消息通知');
+    bb.disabled = (s === 'on' || s === 'denied' || s === 'unsupported');
+  }
+  if (h) {
+    if (s === 'unsupported') h.innerHTML = '当前浏览器不支持系统通知（微信内置浏览器不支持），改用标题栏未读提示。';
+    else if (s === 'denied') h.innerHTML = '通知已被浏览器阻止。请点地址栏锁形图标 → 网站设置 → 通知 → 允许。';
+    else if (s === 'on') h.innerHTML = '✔ 收到消息时会弹出系统通知，即使页面在后台。';
+    else h.innerHTML = '建议开启：切到后台或锁屏时也能收到消息提醒。';
+  }
+}
+/* 必须由用户手势调用，否则浏览器会拒绝 */
+async function askNotify() {
+  if (!NOTIFY_OK()) {
+    showError('浏览器不支持通知', '微信、QQ 等内置浏览器不支持系统通知。请用 <b>Chrome / Edge / Safari</b> 打开本页面。');
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    showError('通知已被阻止', '浏览器已记住你的选择。请点地址栏左侧<b>锁形图标</b> → 网站设置 → 通知 → 改为「允许」，再刷新页面。');
+    return;
+  }
+  try {
+    const r = await Notification.requestPermission();
+    if (r === 'granted') { toast('通知已开启 ✓'); fireNotify('通知已开启', '收到新消息时会在这里提醒你'); }
+    else toast('未开启通知，将用标题栏提示未读');
+  } catch (e) { toast('无法申请通知权限'); }
+  renderNotifyBtn();
+}
+function fireNotify(title, body, tag) {
+  try {
+    if (notifyState() !== 'on') return;
+    const opt = { body: body || '', tag: tag || 'ybnum', renotify: true, silent: false };
+    // favicon 用内联 data URI，避免额外文件请求
+    opt.icon = 'data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="%233b7cff"/><text x="32" y="44" font-size="34" text-anchor="middle" fill="white" font-family="sans-serif">💬</text></svg>');
+    const n = new Notification(title, opt);
+    n.onclick = () => {
+      try { window.focus(); } catch (e) {}
+      if (tag && /^\d{4}$/.test(tag)) openChatWith(tag);
+      n.close();
+      clearUnread();
+    };
+    setTimeout(() => { try { n.close(); } catch (e) {} }, 12000);
+  } catch (e) { /* 部分安卓浏览器要求 SW，失败则静默回退到标题提示 */ }
+}
+/* 提示音：必须在用户交互后才能播放，故缓存 AudioContext */
+function playDing() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(880, audioCtx.currentTime);
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.18, audioCtx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.5);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.5);
+  } catch (e) {}
+}
+/* 标题栏未读提示：任何浏览器都有效，包括不支持通知的微信 */
+function bumpUnread(n) { unread += n || 1; updateTitle(); }
+function clearUnread() { unread = 0; updateTitle(); }
+function updateTitle() {
+  const base = myNum ? '号码 ' + myNum : '号码聊天';
+  document.title = unread > 0 ? '(' + unread + ') ' + base : base;
+}
 const timeStr = ts => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
 /* ================= 本地存储 ================= */
@@ -292,23 +380,33 @@ function publishPresence() {
   pub(T(myNum).pres, { num: myNum, sid: mySid, epk: KP.pubJwk, ts: now() }, true);
 }
 let hbTimer = null, hbPaused = false;
+function connAlive() { return !!(mq && mq.connected); }
 function startHeartbeat() {
   clearInterval(hbTimer);
   publishPresence();
-  hbTimer = setInterval(() => { if (!hbPaused) publishPresence(); }, HB_MS);
+  hbTimer = setInterval(() => {
+    if (hbPaused) return;
+    publishPresence();
+    // 连接中断时给出可见提示（MQTT.js 会自动重连，这里只负责告知）
+    if (!connAlive()) setStatus('wait', '连接中断，正在重连…');
+    else if ($('statusText').textContent.indexOf('重连') >= 0) setStatus('on', '已上线');
+  }, HB_MS);
 }
-/* 安卓上 beforeunload 基本不触发，pagehide 也常被跳过；
-   这里三重兜底 + 缩短 TTL，把「假在线」窗口从 60 秒压到 ~18 秒 */
+/* 关键权衡：切到后台【不】宣告离线。
+   页面在后台仍然活着、能收消息、能弹通知，所以必须保持在线，
+   否则对方会把消息拿去排队，你就收不到通知了。
+   只有真正关闭页面时才清掉状态；安卓上 beforeunload/pagehide 常被跳过，
+   兜底靠 18 秒 TTL 过期。 */
 function clearPresence() { if (myNum && mq) clearRetained(T(myNum).pres); }
 window.addEventListener('beforeunload', clearPresence);
 window.addEventListener('pagehide', clearPresence);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    hbPaused = true;              // 停止续期，让对方在 TTL 内自然判定我离线
-    clearPresence();              // 尽力立即通知
+    // 切后台：保持在线 + 立即续期一次，确保对方眼里我仍在线
+    if (myNum && !hbPaused) publishPresence();
   } else {
-    hbPaused = false;
     if (myNum) { publishPresence(); flushAllPending(); }
+    clearUnread();   // 回到页面即视为已读
   }
 });
 
@@ -379,6 +477,8 @@ function enterMain() {
   $('myNumShow').textContent = myNum;
   ['dial', 'contacts', 'peerState', 'chat', 'composer'].forEach(id => $(id).classList.remove('hidden'));
   outbox = LS.get('outbox', []);
+  updateTitle();
+  renderNotifyBtn();
   startHeartbeat();
   sub(T(myNum).msg);
   sub(T(myNum).pres);
@@ -480,7 +580,18 @@ async function onMsg(topic, p) {
   if (from !== peerNum) openChatWith(from, true);
   else renderHist();
   ackTo(from, [m.id]);
-  if (document.hidden || from !== peerNum) toast('收到 ' + from + ' 的新消息');
+
+  // 新消息提醒：后台/其他会话 → 系统通知 + 提示音；始终累加标题未读
+  const needAlert = document.hidden || from !== peerNum;
+  const preview = m.kind === 'img' ? '[图片]' : (m.text || '');
+  if (needAlert) {
+    bumpUnread(1);
+    fireNotify('来自 ' + from + ' 的新消息', preview.slice(0, 60), from);
+    playDing();
+  } else if (document.hidden) {
+    bumpUnread(1);
+  }
+  toast('收到 ' + from + ' 的新消息');
 }
 function ackTo(num, ids) { pub(T(num).msg, { type: 'ack', from: myNum, ids: ids }, false); }
 
@@ -496,6 +607,7 @@ function openChatWith(n, quiet) {
   sub(T(n).pres); sub(T(n).msg);
   $('peerInput').value = n;
   renderContacts(); renderHist(); renderPeerState();
+  if (!document.hidden) clearUnread();   // 主动打开会话视为已读
   if (!quiet) toast(isOnline(n) ? n + ' 在线' : n + ' 当前离线，消息会排队等他上线');
 }
 function renderHist() {
@@ -690,6 +802,12 @@ document.addEventListener('drop', guard(async e => {
   if (f && peerNum) await submit('img', '', await compressImg(f));
 }));
 $('lightbox').onclick = () => $('lightbox').style.display = 'none';
+$('btnNotify').onclick = () => {
+  const s = notifyState();
+  if (s === 'on') { toast('通知已在系统设置中开启，需到浏览器设置里关闭'); return; }
+  askNotify();
+};
+$('btnNotifyBoot').onclick = askNotify;
 $('btnLeave').onclick = guard(() => {
   if (myNum) clearRetained(T(myNum).pres);
   if (mq) { try { mq.end(true); } catch (e) {} mq = null; }
@@ -706,8 +824,14 @@ $('btnLeave').onclick = guard(() => {
 
 /* ================= 启动 ================= */
 (async function init() {
-  if (/MicroMessenger/i.test(navigator.userAgent)) {
-    showError('微信内置浏览器', '功能受限，请点右上角「···」→ 在浏览器中打开。');
+  const inWx = /MicroMessenger/i.test(navigator.userAgent);
+  const inQQ = /\sQQ\//i.test(navigator.userAgent) && !/QQBrowser/i.test(navigator.userAgent);
+  if (inWx || inQQ) {
+    showError(
+      '微信/QQ 内置浏览器不支持消息通知',
+      '它们的内核禁用了系统通知。想要收到消息提醒，请点右上角<b>「···」→ 在浏览器中打开</b>（推荐 Chrome），' +
+      '然后在本页点「🔔 开启消息通知」。<br>继续使用也能聊天，只是切到后台时不会有提醒。'
+    );
   }
   if (!window.isSecureContext) {
     showError(
@@ -724,6 +848,7 @@ $('btnLeave').onclick = guard(() => {
     $('numInput').value = saved;
     $('bootHint').textContent = '上次用的号码，按「上线」继续';
   }
+  renderNotifyBtn();
   showPanel('panelBoot');
 })();
 </script>
