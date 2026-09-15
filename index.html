@@ -165,7 +165,7 @@
 const $ = id => document.getElementById(id);
 const NS = 'ybnum/v2';
 const T = n => ({ pres: NS + '/p/' + n + '/presence', msg: NS + '/p/' + n + '/msg' });
-const ONLINE_TTL = 60000, HB_MS = 20000;
+const ONLINE_TTL = 18000, HB_MS = 7000, RETRY_MS = 8000, ACK_WARN_MS = 25000;
 const randSid = () => Math.random().toString(36).slice(2, 10);
 const now = () => Date.now();
 
@@ -291,14 +291,26 @@ function publishPresence() {
   if (!myNum) return;
   pub(T(myNum).pres, { num: myNum, sid: mySid, epk: KP.pubJwk, ts: now() }, true);
 }
-let hbTimer = null;
+let hbTimer = null, hbPaused = false;
 function startHeartbeat() {
   clearInterval(hbTimer);
   publishPresence();
-  hbTimer = setInterval(publishPresence, HB_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) publishPresence(); });
+  hbTimer = setInterval(() => { if (!hbPaused) publishPresence(); }, HB_MS);
 }
-window.addEventListener('beforeunload', () => { if (myNum) clearRetained(T(myNum).pres); });
+/* 安卓上 beforeunload 基本不触发，pagehide 也常被跳过；
+   这里三重兜底 + 缩短 TTL，把「假在线」窗口从 60 秒压到 ~18 秒 */
+function clearPresence() { if (myNum && mq) clearRetained(T(myNum).pres); }
+window.addEventListener('beforeunload', clearPresence);
+window.addEventListener('pagehide', clearPresence);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    hbPaused = true;              // 停止续期，让对方在 TTL 内自然判定我离线
+    clearPresence();              // 尽力立即通知
+  } else {
+    hbPaused = false;
+    if (myNum) { publishPresence(); flushAllPending(); }
+  }
+});
 
 $('btnGo').onclick = guard(async () => {
   const n = ($('numInput').value || '').trim();
@@ -376,7 +388,11 @@ function enterMain() {
   const last = LS.get('lastPeer', null);
   if (last) openChatWith(last, true);
   else renderPeerState();
-  setInterval(() => { renderContacts(); renderPeerState(); }, 5000);
+  // 有未确认消息时同步刷新气泡，让「等待/未确认」提示随状态变化
+  setInterval(() => {
+    renderContacts(); renderPeerState();
+    if (outbox.some(o => o.to === peerNum && o.lastTry > 0)) renderHist();
+  }, 3000);
 }
 function watchAll() {
   const nums = new Set(contacts);
@@ -403,9 +419,12 @@ function renderPeerState() {
   const el = $('peerState');
   if (!peerNum) { el.textContent = '尚未选择联系人，输入对方 4 位号码开始'; return; }
   const on = isOnline(peerNum);
-  const pend = outbox.filter(o => o.to === peerNum).length;
+  const mine = outbox.filter(o => o.to === peerNum);
+  const unacked = mine.filter(o => o.lastTry > 0).length;
+  const queued = mine.length - unacked;
   el.innerHTML = '对方 <b>' + peerNum + '</b> · ' + (on ? '<span style="color:var(--ok)">在线</span>' : '离线') +
-    (pend ? ' · <span style="color:var(--warn)">' + pend + ' 条待发送</span>' : '');
+    (queued ? ' · <span style="color:var(--warn)">' + queued + ' 条待发送</span>' : '') +
+    (unacked ? ' · <span style="color:var(--warn)">' + unacked + ' 条未确认</span>' : '');
 }
 
 /* ================= 消息收发 ================= */
@@ -501,8 +520,19 @@ function renderItem(it) {
   const m = document.createElement('div'); m.className = 'meta';
   m.innerHTML = '<span>' + timeStr(it.ts) + '</span>';
   if (it.who === 'me') {
-    if (it.st === 'pending') m.innerHTML += '<span class="pending">🕓 待发送（对方离线）</span>';
-    else if (it.st === 'sent') m.innerHTML += '<span class="sent">✓ 已送达</span>';
+    if (it.st === 'pending') {
+      m.innerHTML += '<span class="pending">🕓 待发送（对方离线）</span>';
+    } else if (it.st === 'sending') {
+      if (!isOnline(it.to)) {
+        m.innerHTML += '<span class="pending">🕓 对方已离线，回来后自动重发</span>';
+      } else if (now() - it.ts > ACK_WARN_MS) {
+        m.innerHTML += '<span class="pending">⚠️ 对方未确认，可能已关闭页面</span>';
+      } else {
+        m.innerHTML += '<span class="pending">⏳ 已发出，等待对方接收…</span>';
+      }
+    } else if (it.st === 'sent') {
+      m.innerHTML += '<span class="sent">✓ 已送达</span>';
+    }
   }
   row.appendChild(b); row.appendChild(m);
   return row;
@@ -519,31 +549,54 @@ async function sendNow(it) {
   try {
     const env = await encFor(p.epk, { id: it.id, kind: it.kind, text: it.text, src: it.src, ts: it.ts });
     pub(T(it.to).msg, { from: myNum, epk: env.epk, iv: env.iv, ct: env.ct }, false);
+    it.lastTry = now();
+    // 由「排队中」转为「已发出，等待对方确认」
+    const h = getHist(it.to); const rec = h.find(x => x.id === it.id);
+    if (rec && rec.st === 'pending') { rec.st = 'sending'; saveHist(it.to); }
     return true;
   } catch (e) { console.error(e); return false; }
 }
 
 async function submit(kind, text, src) {
   if (!peerNum) return showError('还没选联系人', '请先在上方输入对方的 4 位号码。');
-  const it = { id: newId(), to: peerNum, kind, text: text || '', src: src || null, ts: now() };
+  const it = { id: newId(), to: peerNum, kind, text: text || '', src: src || null, ts: now(), lastTry: 0 };
+  outbox.push(it); saveOutbox();
   if (!isOnline(peerNum)) {
     appendHist(it.to, { ...it, who: 'me', st: 'pending' });
-    outbox.push(it); saveOutbox();
     renderHist(); renderPeerState();
     toast(peerNum + ' 离线，消息已排队，上线后自动发送');
     return;
   }
-  appendHist(it.to, { ...it, who: 'me', st: 'sent' });
-  outbox.push(it); saveOutbox();
-  const ok = await sendNow(it);
-  if (!ok) {
-    outbox = outbox.filter(x => x.id !== it.id);
-    const h = getHist(it.to); const rec = h.find(x => x.id === it.id);
-    if (rec) { rec.st = 'pending'; saveHist(it.to); }
-    outbox.push(it); saveOutbox();
-    toast('发送未成功，将在对方上线后重试');
-  }
+  // 关键：发出去不等于送达，必须等对方 ack 才标「已送达」
+  appendHist(it.to, { ...it, who: 'me', st: 'sending' });
+  await sendNow(it);
   renderHist(); renderPeerState();
+}
+
+/* 未确认消息定时重发：覆盖「对方页面已关但状态尚未过期」的窗口 */
+let retrying = false;
+async function retryUnacked() {
+  if (retrying) return;
+  retrying = true;
+  try {
+    const t = now();
+    for (const o of outbox.slice()) {
+      if (t - (o.lastTry || 0) < RETRY_MS) continue;
+      if (!isOnline(o.to)) continue;
+      await sendNow(o);
+      saveOutbox();
+      await new Promise(r => setTimeout(r, 60));
+    }
+  } finally {
+    retrying = false;
+    renderHist(); renderPeerState();
+  }
+}
+setInterval(retryUnacked, 4000);
+
+function flushAllPending() {
+  const nums = new Set(outbox.map(o => o.to));
+  nums.forEach(n => { if (isOnline(n)) flushPeer(n); });
 }
 
 /* 对方上线 → 自动重发 */
@@ -558,8 +611,7 @@ async function flushPeer(num) {
       if (!isOnline(num)) break;
       const ok = await sendNow(it);
       if (!ok) break;
-      outbox = outbox.filter(x => x.id !== it.id);
-      saveOutbox();
+      saveOutbox();               // 不从 outbox 移除，等对方 ack 才算送达
       await new Promise(r => setTimeout(r, 150));
     }
   } finally {
@@ -567,10 +619,7 @@ async function flushPeer(num) {
     renderHist(); renderPeerState();
   }
 }
-setInterval(() => {
-  const nums = new Set(outbox.map(o => o.to));
-  nums.forEach(n => { if (isOnline(n)) flushPeer(n); });
-}, 6000);
+setInterval(flushAllPending, 6000);
 
 /* ================= 图片（自适应压缩，适配中转报文上限） ================= */
 function compressImg(file, maxDim = 1024, q = 0.72) {
