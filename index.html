@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>号码聊天 · 无需 WebRTC</title>
+<meta name="theme-color" content="#3b7cff">
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   :root {
@@ -30,6 +31,8 @@
   .dot.wait { background:var(--warn); }
   .btn-mini { font-size:12px; padding:4px 10px; border:1px solid var(--line); background:#fff;
     border-radius:6px; color:var(--sub); cursor:pointer; }
+  .ver { font-size:10px; color:var(--sub); border:1px solid var(--line); border-radius:4px;
+    padding:1px 5px; font-variant-numeric:tabular-nums; white-space:nowrap; }
 
   #errbar { flex:none; background:#fdecec; color:#b42318; border-bottom:1px solid #f6c9c6;
     padding:10px 14px; font-size:13px; line-height:1.6; display:none; }
@@ -113,8 +116,10 @@
 <div id="app">
   <header>
     <div class="mynum">我的号码 <b id="myNumShow">----</b></div>
+    <span class="ver" id="verTag" title="版本号"></span>
+    <button class="btn-mini" id="btnKeep" title="后台保活">💤</button>
     <button class="btn-mini" id="btnNotify" title="消息通知">🔔</button>
-    <div class="status"><span class="dot" id="dot"></span><span id="statusText">未上线</span></div>
+    <div class="status" style="margin-left:auto"><span class="dot" id="dot"></span><span id="statusText">未上线</span></div>
     <button class="btn-mini" id="btnLeave">换号</button>
   </header>
 
@@ -134,10 +139,12 @@
         <button class="ghost" id="btnNotifyBoot">🔔 开启消息通知</button>
       </div>
       <div class="hint" id="notifyHint"></div>
+      <div class="hint" id="keepHint"></div>
       <div class="hint">
         🔒 需要 <b>https</b> 环境（或 localhost）才能加密。<br>
         全程不需要 WebRTC，任何现代浏览器都能用。聊天内容在你手机上加密后才发出，中转方只看到密文。
       </div>
+      <div class="hint" style="text-align:center;opacity:.7">版本 <span id="verBoot"></span></div>
     </div>
 
     <div class="card hidden" id="panelWait">
@@ -167,6 +174,7 @@
 
 <script>
 /* ================= 基础 ================= */
+const APP_VER = 'v1.4.0';
 const $ = id => document.getElementById(id);
 const NS = 'ybnum/v2';
 const T = n => ({ pres: NS + '/p/' + n + '/presence', msg: NS + '/p/' + n + '/msg' });
@@ -187,7 +195,68 @@ function toast(msg, ms = 2600) {
 }
 function setStatus(s, text) { $('dot').className = 'dot' + (s === 'on' ? ' on' : s === 'wait' ? ' wait' : ''); $('statusText').textContent = text; }
 
-/* ================= 消息通知 ================= */
+/* ================= 后台保活 =================
+   根因：安卓 Chrome 会对后台标签页节流——10 秒后限制定时器，5 分钟后 JS 每分钟才跑一次。
+   心跳一停，18 秒 TTL 就过期，对方判定你离线，消息被排队，通知自然收不到。
+   对策：播放一段无声音频。Chrome 明确豁免「正在播放音频」的标签，定时器不再被节流。 */
+const KEEP_KEY = 'keep';
+let keepOn = true;      // 真正的值在 init 里从本地存储读取（此处 LS 尚未定义）
+let keepAudio = null, keepUrl = null, wakeLock = null;
+
+/* 动态生成一段静音 WAV，无需外部文件 */
+function makeSilence(seconds) {
+  const rate = 8000, n = rate * seconds;
+  const buf = new ArrayBuffer(44 + n);          // 8bit 单声道，无压缩
+  const v = new DataView(buf);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); v.setUint32(4, 36 + n, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  wr(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);   // 128 = 静音
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+async function startKeep() {
+  if (!keepOn) return;
+  try {
+    if (!keepUrl) keepUrl = makeSilence(2);
+    if (!keepAudio) {
+      keepAudio = new Audio(keepUrl);
+      keepAudio.loop = true;
+      keepAudio.volume = 0.01;      // 近乎无声，但不为 0（0 会被当作未播放）
+      keepAudio.setAttribute('playsinline', '');
+    }
+    if (keepAudio.paused) await keepAudio.play().catch(() => {});
+  } catch (e) {}
+  // 屏幕唤醒锁：仅在页面可见时有效，切后台会自动释放，但仍值得一试
+  try {
+    if ('wakeLock' in navigator && document.visibilityState === 'visible' && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch (e) {}
+}
+function stopKeep() {
+  try { if (keepAudio) keepAudio.pause(); } catch (e) {}
+  try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch (e) {}
+}
+function renderKeepBtn() {
+  const b = $('btnKeep'); if (!b) return;
+  b.textContent = keepOn ? '🔊' : '💤';
+  b.title = keepOn ? '后台保活：已开启（点击关闭）' : '后台保活：已关闭（点击开启）';
+  b.style.color = keepOn ? 'var(--ok)' : 'var(--sub)';
+}
+async function toggleKeep() {
+  keepOn = !keepOn;
+  LS.set(KEEP_KEY, keepOn);
+  if (keepOn) await startKeep(); else stopKeep();
+  renderKeepBtn();
+  toast(keepOn ? '已开启后台保活，切到后台也能收消息' : '已关闭后台保活，切到后台可能收不到消息');
+}
+
+
 const NOTIFY_OK = () => typeof Notification !== 'undefined';
 let unread = 0;              // 未读消息数
 let audioCtx = null;
@@ -261,12 +330,14 @@ function playDing() {
     o.connect(g); g.connect(audioCtx.destination);
     o.start(); o.stop(audioCtx.currentTime + 0.5);
   } catch (e) {}
+  // 振动：安卓 Chrome 后台也能触发，是页面不可见时最可靠的提醒
+  try { if (navigator.vibrate) navigator.vibrate([200, 120, 200]); } catch (e) {}
 }
 /* 标题栏未读提示：任何浏览器都有效，包括不支持通知的微信 */
 function bumpUnread(n) { unread += n || 1; updateTitle(); }
 function clearUnread() { unread = 0; updateTitle(); }
 function updateTitle() {
-  const base = myNum ? '号码 ' + myNum : '号码聊天';
+  const base = (myNum ? '号码 ' + myNum : '号码聊天') + ' ' + APP_VER;
   document.title = unread > 0 ? '(' + unread + ') ' + base : base;
 }
 const timeStr = ts => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
@@ -402,11 +473,18 @@ window.addEventListener('beforeunload', clearPresence);
 window.addEventListener('pagehide', clearPresence);
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    // 切后台：保持在线 + 立即续期一次，确保对方眼里我仍在线
+    // 切后台：保持在线 + 立即续期一次 + 启动保活音频，确保不被节流
     if (myNum && !hbPaused) publishPresence();
+    startKeep();
   } else {
-    if (myNum) { publishPresence(); flushAllPending(); }
+    if (myNum) {
+      publishPresence();
+      // 被冻结后回来：连接可能已断，检查并重连
+      if (!connAlive()) { setStatus('wait', '正在重新连接…'); try { mq && mq.reconnect && mq.reconnect(); } catch (e) {} }
+      flushAllPending();
+    }
     clearUnread();   // 回到页面即视为已读
+    startKeep();     // 重新申请唤醒锁
   }
 });
 
@@ -423,6 +501,9 @@ $('btnGo').onclick = guard(async () => {
           '请把本文件放到 <b>GitHub Pages / Netlify / Vercel</b>（都免费）后用 https 打开。'
     );
   }
+  // 关键：必须在同步阶段（用户手势尚未失效）启动音频，
+  // 否则 await 之后浏览器会拒绝自动播放，后台保活就失效了
+  startKeep();
   $('btnGo').disabled = true;
   showPanel('panelWait');
   $('waitHint').textContent = '正在接通网络…';
@@ -479,6 +560,8 @@ function enterMain() {
   outbox = LS.get('outbox', []);
   updateTitle();
   renderNotifyBtn();
+  renderKeepBtn();
+  startKeep();          // 用户刚点了「上线」，属于有效手势，此时启动音频最可能成功
   startHeartbeat();
   sub(T(myNum).msg);
   sub(T(myNum).pres);
@@ -808,6 +891,7 @@ $('btnNotify').onclick = () => {
   askNotify();
 };
 $('btnNotifyBoot').onclick = askNotify;
+$('btnKeep').onclick = toggleKeep;
 $('btnLeave').onclick = guard(() => {
   if (myNum) clearRetained(T(myNum).pres);
   if (mq) { try { mq.end(true); } catch (e) {} mq = null; }
@@ -848,7 +932,24 @@ $('btnLeave').onclick = guard(() => {
     $('numInput').value = saved;
     $('bootHint').textContent = '上次用的号码，按「上线」继续';
   }
+  keepOn = LS.get(KEEP_KEY, true);
+  $('verTag').textContent = APP_VER;
+  updateTitle();
+  $('verTag').onclick = () => {
+    showError('版本 ' + APP_VER,
+      '后台保活：' + (keepOn ? '已开启' : '已关闭') +
+      '　通知：' + ({ on: '已开启', off: '未开启', denied: '被浏览器阻止', unsupported: '浏览器不支持' })[notifyState()] +
+      '<br>支持的系统通知需要 https + Chrome/Edge。微信内置浏览器不支持，只能用标题栏未读提示。');
+  };
   renderNotifyBtn();
+  renderKeepBtn();
+  {
+    const kh = $('keepHint');
+    if (kh) kh.innerHTML = keepOn
+      ? '🔊 后台保活已开启：切到后台或锁屏仍可收消息（会略微增加耗电）。'
+      : '💤 后台保活已关闭：切到后台可能收不到消息。建议开启。';
+    const vb = $('verBoot'); if (vb) vb.textContent = APP_VER;
+  }
   showPanel('panelBoot');
 })();
 </script>
